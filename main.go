@@ -13,7 +13,7 @@ import (
 )
 
 // world's bodies total count
-const bcount = 4000
+const bcount = 10000
 const (
 	width  = 1270
 	height = 720
@@ -40,44 +40,50 @@ func sumForce(b body, w world) vector {
 	return sum
 }
 
+func calcGalaxyMass(w *world) number {
+	var mass number
+	for _, b := range w {
+		mass += b.mass
+	}
+
+	return mass
+}
+
 func makeGenesisState() world {
 	var w world
 
 	const dst = 100
-	const vel = 3E21
-	const mmin = 100
-	const mmax = 1E1
-	const rad = 200
+	const vel = 0
+	const vel_b = 1500
+	const mmin = 1
+	const mmax = 10
+	const rad = 10
 
-	// for i := 0; i < len(w); i++ {
-	// 	w[i].coord.x = width/2 + randBetween(-dst, +dst)*number(rand.Float64())
-	// 	w[i].coord.y = height/2 + randBetween(-dst, +dst)*number(rand.Float64())
-
-	// 	w[i].mass = randBetween(mmin, mmax) * number(rand.Float64())
-
-	// 	w[i].velocity.x = randBetween(-vel, vel)
-	// 	w[i].velocity.y = randBetween(-vel, vel)
-	// }
-
-	for i := 0; i < len(w)/3*2; i++ {
+	for i := 0; i < len(w); i++ {
 		w[i].coord.x = width/2 - rad + randBetween(-dst, +dst)*number(rand.Float64())
 		w[i].coord.y = height/2 + rad + randBetween(-dst, +dst)*number(rand.Float64())
 
 		w[i].mass = randBetween(mmin, mmax)
 
-		w[i].velocity.x = vel
-		w[i].velocity.y = 0
+		w[i].velocity.x = randBetween(-vel, vel) + vel
+		w[i].velocity.y = randBetween(-vel, vel)
 	}
 
-	for i := len(w) / 3 * 2; i < len(w); i++ {
-		w[i].coord.x = width/2 - 200
-		w[i].coord.y = height/2 + 50
+	gm := calcGalaxyMass(&w) * 1000
 
-		w[i].mass = 1E10
+	b := &w[len(w)-1]
+	b.coord.x = width/2 - 200
+	b.coord.y = height/2 - 100
+	b.mass = gm
+	b.velocity.x = vel_b
+	b.velocity.y = 0
 
-		w[i].velocity.x = 0 //randBetween(-vel, vel)
-		w[i].velocity.y = 0 // randBetween(-vel, vel)
-	}
+	c := &w[len(w)-2]
+	c.coord.x = width/2 + 50
+	c.coord.y = height/2 + 200
+	c.mass = gm
+	c.velocity.x = -vel_b
+	// c.velocity.y = -vel_b
 
 	return w
 }
@@ -98,6 +104,7 @@ func init() {
 	// See documentation for functions that are only allowed to be called from the main thread.
 	runtime.LockOSThread()
 }
+
 func main() {
 	// seed random by current time
 	rand.Seed(time.Now().Unix())
@@ -124,7 +131,7 @@ func main() {
 	var pixelBuf pixels
 	vao := makeVao(pixelBuf[:])
 
-	const dt = 0.1E-20
+	const dt = 1E-4
 	// t := number(0.0)
 
 	fmt.Println("Begin")
@@ -133,13 +140,9 @@ func main() {
 	taskBatch := int(math.Floor(float64(len(world) / threads)))
 
 	var wg sync.WaitGroup
-
 	worker := func(begin, end int) {
 		for i := begin; i < end; i++ {
 			b := &world[i]
-			// // position = position + velocity * dt;
-			b.coord.x += b.velocity.x * dt * 0.5
-			b.coord.y += b.velocity.y * dt * 0.5
 
 			// velocity = velocity + ( force / mass ) * dt;
 			sf := sumForce(*b, world)
@@ -153,32 +156,58 @@ func main() {
 				fm := sf.y / md
 				b.velocity.y += fm
 			}
-
-			// position = position + velocity * dt;
-			b.coord.x += b.velocity.x * dt * 0.5
-			b.coord.y += b.velocity.y * dt * 0.5
 		}
 
 		wg.Done()
 	}
 
-	for {
-		wg.Add(threads)
+	integrator := func(begin, end int) {
+		for i := begin; i < end; i++ {
+			b := &world[i]
 
-		for group := 0; group < threads; group++ {
-			b := group * taskBatch
-			e := b + taskBatch
-			go worker(b, e)
+			// position = position + velocity * dt;
+			b.coord.x += b.velocity.x * dt
+			b.coord.y += b.velocity.y * dt
+		}
+		wg.Done()
+	}
+
+	for {
+		// var last = time.Now()
+
+		// calc forces
+		{
+			wg.Add(threads)
+			for group := 0; group < threads; group++ {
+				b := group * taskBatch
+				e := b + taskBatch
+				go worker(b, e)
+			}
+			wg.Wait() // sync threads
 		}
 
-		wg.Wait()
+		// integrate coords
+		{
+			wg.Add(threads)
+			for group := 0; group < threads; group++ {
+				b := group * taskBatch
+				e := b + taskBatch
+				go integrator(b, e)
+			}
+			wg.Wait() // sync threads
+		}
 
-		worldToPixels(&world, &pixelBuf)
-		gl.BindBuffer(gl.ARRAY_BUFFER, vao[2])
-		gl.BufferSubData(gl.ARRAY_BUFFER, 0, 4*len(pixelBuf), gl.Ptr(&pixelBuf[0]))
-		gl.BindBuffer(gl.ARRAY_BUFFER, 0)
+		// render
+		{
+			worldToPixels(&world, &pixelBuf)
+			gl.BindBuffer(gl.ARRAY_BUFFER, vao[2])
+			gl.BufferSubData(gl.ARRAY_BUFFER, 0, 4*len(pixelBuf), gl.Ptr(&pixelBuf[0]))
+			gl.BindBuffer(gl.ARRAY_BUFFER, 0)
 
-		draw(window, program, vao)
+			draw(window, program, vao)
+		}
+
+		// fmt.Printf("microseconds per particle: %d\n", time.Now().Sub(last).Nanoseconds()/bcount/1000)
 	}
 
 	fmt.Println("End")
